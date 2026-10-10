@@ -4,7 +4,7 @@ import { onAuthStateChanged, signInAnonymously } from 'firebase/auth';
 
 import { get, onValue, ref, runTransaction, update } from 'firebase/database';
 
-import { Swords, Users, Copy, ShieldCheck, Trophy, RotateCcw, DoorOpen } from 'lucide-react';
+import { Swords, Users, Copy, ShieldCheck, Trophy, RotateCcw, DoorOpen, Shield, HeartPulse, Flame } from 'lucide-react';
 
 import { auth, db, firebaseConfigured } from './firebase';
 
@@ -182,7 +182,7 @@ export default function PvpArena({ wallet, onRewardReady }) {
 
             createdAt: Date.now(),
 
-            player1: { uid: firebaseUser.uid, wallet, hp: 100 },
+            player1: { uid: firebaseUser.uid, wallet, hp: 100, defending: false, healsLeft: 2, specialReady: true },
 
             player2: null,
 
@@ -274,7 +274,7 @@ export default function PvpArena({ wallet, onRewardReady }) {
         player2Ref,
         currentPlayer2 => {
           if (currentPlayer2 !== null) return;
-          return { uid: firebaseUser.uid, wallet, hp: 100 };
+          return { uid: firebaseUser.uid, wallet, hp: 100, defending: false, healsLeft: 2, specialReady: true };
         },
         { applyLocally: false }
       );
@@ -305,67 +305,61 @@ export default function PvpArena({ wallet, onRewardReady }) {
     }
   }
 
-  async function attack() {
-
+  async function takeAction(action) {
     if (!roomCode || !firebaseUser || !mySlot) return;
-
     setBusy(true);
-
     try {
-
       const roomRef = ref(db, `pvpRooms/${roomCode}`);
-
       const result = await runTransaction(roomRef, existing => {
-if (!existing || existing.status !== 'active' || existing.currentTurn !== firebaseUser.uid) return;
-
+        if (!existing || existing.status !== 'active' || existing.currentTurn !== firebaseUser.uid) return;
         const attacker = mySlot;
-
         const defender = opponentSlot;
-
         if (!existing[attacker] || !existing[defender]) return;
-
-        const damage = 12 + Math.floor(Math.random() * 15);
-
-        const nextHp = Math.max(0, Number(existing[defender].hp) - damage);
-
-        const winnerUid = nextHp === 0 ? firebaseUser.uid : null;
-
-        const log = [...(existing.log || []), { text: `${shortAddress(existing[attacker].wallet)} attacked for ${damage} damage.`, at: Date.now() }].slice(-12);
-
-        if (winnerUid) log.push({ text: `${shortAddress(existing[attacker].wallet)} wins the duel!`, at: Date.now() });
-
+        const actor = { ...existing[attacker] };
+        const target = { ...existing[defender] };
+        let logText = '';
+        if (action === 'attack') {
+          let damage = 20;
+          if (target.defending) { damage = Math.ceil(damage / 2); target.defending = false; }
+          target.hp = Math.max(0, Number(target.hp) - damage);
+          logText = `${shortAddress(actor.wallet)} struck for ${damage} damage${damage < 20 ? ' (guarded)' : ''}.`;
+        } else if (action === 'defend') {
+          actor.defending = true;
+          logText = `${shortAddress(actor.wallet)} raised their guard. The next hit is reduced by 50%.`;
+        } else if (action === 'heal') {
+          if ((actor.healsLeft ?? 2) <= 0 || actor.hp >= 100) return;
+          const before = Number(actor.hp);
+          actor.hp = Math.min(100, before + 15);
+          actor.healsLeft = (actor.healsLeft ?? 2) - 1;
+          logText = `${shortAddress(actor.wallet)} restored ${actor.hp - before} HP. (${actor.healsLeft} heals left)`;
+        } else if (action === 'special') {
+          if (actor.specialReady === false) return;
+          let damage = 30;
+          if (target.defending) { damage = Math.ceil(damage / 2); target.defending = false; }
+          target.hp = Math.max(0, Number(target.hp) - damage);
+          actor.specialReady = false;
+          logText = `${shortAddress(actor.wallet)} unleashed a SPECIAL for ${damage} damage!`;
+        } else return;
+        const winnerUid = target.hp === 0 ? firebaseUser.uid : null;
+        const log = [...(existing.log || []), { text: logText, at: Date.now() }];
+        if (winnerUid) log.push({ text: `${shortAddress(actor.wallet)} wins the duel and earns the right to claim loot!`, at: Date.now() });
         return {
-
           ...existing,
-
-          [defender]: { ...existing[defender], hp: nextHp },
-
-          currentTurn: winnerUid ? null : existing[defender].uid,
-
+          [attacker]: actor,
+          [defender]: target,
+          currentTurn: winnerUid ? null : target.uid,
           winnerUid,
-
           status: winnerUid ? 'finished' : 'active',
-
           round: Number(existing.round || 0) + 1,
-
-          log: log.slice(-12),
-
+          log: log.slice(-20),
         };
-
       }, { applyLocally: false });
-
-      if (!result.committed) setMessage('It is not your turn, or the duel has already ended.');
-
-      else setMessage(result.snapshot.val()?.status === 'finished' ? 'Duel finished! Winner recorded in the shared room.' : 'Attack synced. Waiting for your opponent.');
-
+      if (!result.committed) setMessage('Action unavailable: wait for your turn, or check whether that ability has already been used.');
+      else setMessage(result.snapshot.val()?.status === 'finished' ? 'Victory! Your reward is ready to claim after server verification.' : 'Move synced to both players.');
     } catch (error) {
-
       console.error(error);
-
-      setMessage(`Attack failed: ${error.message}`);
-
+      setMessage(`Move failed: ${error.message}`);
     } finally { setBusy(false); }
-
   }
 
   async function resetRoom() {
@@ -388,9 +382,9 @@ if (!existing || existing.status !== 'active' || existing.currentTurn !== fireba
 
           status: existing.player2 ? 'active' : 'waiting',
 
-          player1: { ...existing.player1, hp: 100 },
+          player1: { ...existing.player1, hp: 100, defending: false, healsLeft: 2, specialReady: true },
 
-          player2: existing.player2 ? { ...existing.player2, hp: 100 } : null,
+          player2: existing.player2 ? { ...existing.player2, hp: 100, defending: false, healsLeft: 2, specialReady: true } : null,
 
           currentTurn: existing.player1.uid,
 
@@ -508,7 +502,7 @@ if (!existing || existing.status !== 'active' || existing.currentTurn !== fireba
 
               </div>
 
-              {room.status === 'active' && <div style={{ ...panelStyle, textAlign: 'center', marginBottom: 16 }}><h3 style={{ marginTop: 0 }}>Your action</h3><p style={{ color: '#a99bc9' }}>Attack deals 12–26 damage. Turns and health are shared live.</p><button className="primary-btn" onClick={attack} disabled={!isMyTurn || busy}><Swords size={16} /> {busy ? 'Syncing…' : isMyTurn ? 'Attack opponent' : 'Waiting for opponent'}</button></div>}
+              {room.status === 'active' && <div style={{ ...panelStyle, textAlign: 'center', marginBottom: 16 }}><h3 style={{ marginTop: 0 }}>Your action</h3><p style={{ color: '#a99bc9' }}>Choose your move. Attack deals 20 damage; defend halves the next hit; heal restores 15 HP (2 uses); special deals 30 damage (once).</p><div className="combat-actions"><button className="primary-btn" onClick={() => takeAction('attack')} disabled={!isMyTurn || busy}><Swords size={16}/> Attack · 20</button><button className="outline-btn" onClick={() => takeAction('defend')} disabled={!isMyTurn || busy}><Shield size={15}/> Defend</button><button className="outline-btn" onClick={() => takeAction('heal')} disabled={!isMyTurn || busy || (room[mySlot]?.healsLeft ?? 2) <= 0 || room[mySlot]?.hp >= 100}><HeartPulse size={15}/> Heal · {room[mySlot]?.healsLeft ?? 2}</button><button className="outline-btn" onClick={() => takeAction('special')} disabled={!isMyTurn || busy || room[mySlot]?.specialReady === false}><Flame size={15}/> Special · 30</button></div><small style={{display:'block',marginTop:10,color:'#9286b4'}}>{busy ? 'Resolving move…' : isMyTurn ? 'Your turn — choose wisely.' : 'Opponent is choosing a move.'}</small></div>}
 
               {room.status === 'finished' && <div className="victory" style={{ marginBottom: 16 }}><Trophy size={17} /> {room.winnerUid === firebaseUser?.uid ? 'You won the duel!' : 'Your opponent won the duel.'} <button className="outline-btn" onClick={resetRoom} disabled={busy}><RotateCcw size={14} /> Rematch</button></div>}
 
